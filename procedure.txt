@@ -1,0 +1,266 @@
+/*!50003 DROP PROCEDURE IF EXISTS `fsm_perform_action` */;
+/*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+/*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+/*!50003 SET @saved_col_connection = @@collation_connection */ ;
+/*!50003 SET character_set_client  = utf8mb4 */ ;
+/*!50003 SET character_set_results = utf8mb4 */ ;
+/*!50003 SET collation_connection  = utf8mb4_0900_ai_ci */ ;
+/*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+/*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
+DELIMITER ;;
+CREATE DEFINER=`root`@`%` PROCEDURE `fsm_perform_action`(
+    IN p_entity_type VARCHAR(50),
+    IN p_entity_id INT,
+    IN p_action_name VARCHAR(100),
+    IN p_user_id INT,
+    IN p_extra_id VARCHAR(255)
+)
+BEGIN
+    DECLARE v_current_state_id INT;
+    DECLARE v_next_state_id INT;
+    DECLARE v_action_id INT;
+    DECLARE v_status_field VARCHAR(50);
+    DECLARE v_table_name VARCHAR(50);
+    DECLARE v_message TEXT;
+    DECLARE v_current_status VARCHAR(50);
+    DECLARE v_next_status VARCHAR(50);
+    DECLARE v_locker_id INT DEFAULT NULL;
+    DECLARE v_state VARCHAR(50);
+    DECLARE v_active_flag TINYINT(1) DEFAULT 1;
+    DECLARE v_cnt INT DEFAULT 0;
+
+    -- Обработчик исключений
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        INSERT IGNORE INTO fsm_errors_log(error_time, error_message, entity_type, entity_id, action_name, user_id)
+        VALUES (NOW(), CONCAT('SQL Exception during ', p_action_name), p_entity_type, p_entity_id, p_action_name, p_user_id);
+    END;
+
+    -- ОСНОВНОЙ БЛОК
+    proc_end: BEGIN
+        -- 1. Определяем таблицу и поле статуса
+        IF p_entity_type = 'order' THEN
+            SET v_table_name = 'orders';
+            SET v_status_field = 'status';
+        ELSEIF p_entity_type = 'trip' THEN
+            SET v_table_name = 'trips';
+            SET v_status_field = 'status';
+        ELSEIF p_entity_type = 'locker' THEN
+            SET v_table_name = 'locker_cells';
+            SET v_status_field = 'status';
+        ELSE
+            INSERT IGNORE INTO fsm_errors_log(error_time, error_message, entity_type, entity_id, action_name, user_id)
+            VALUES (NOW(), CONCAT('Unknown entity_type: ', p_entity_type), p_entity_type, p_entity_id, p_action_name, p_user_id);
+            LEAVE proc_end;
+        END IF;
+
+        -- 2. Проверяем существование записи
+        SET v_cnt = 0;
+        SET @check_sql = CONCAT('SELECT COUNT(*) INTO @cnt FROM ', v_table_name, ' WHERE id = ', p_entity_id);
+        PREPARE stmt_check FROM @check_sql;
+        EXECUTE stmt_check;
+        DEALLOCATE PREPARE stmt_check;
+
+        IF @cnt = 0 THEN
+            INSERT IGNORE INTO fsm_errors_log(error_time, error_message, entity_type, entity_id, action_name, user_id)
+            VALUES (NOW(), CONCAT('Entity not found: ', p_entity_type, ' #', p_entity_id), p_entity_type, p_entity_id, p_action_name, p_user_id);
+            LEAVE proc_end;
+        END IF;
+
+        -- 3. Получаем текущее состояние
+        SET @sql = CONCAT('SELECT ', v_status_field, ' INTO @current_status FROM ', v_table_name, ' WHERE id = ', p_entity_id);
+        PREPARE stmt1 FROM @sql;
+        EXECUTE stmt1;
+        DEALLOCATE PREPARE stmt1;
+
+        SET v_current_status = @current_status;
+
+        IF v_current_status IS NULL THEN
+            INSERT IGNORE INTO fsm_errors_log(error_time, error_message, entity_type, entity_id, action_name, user_id)
+            VALUES (NOW(), CONCAT('Entity has NULL status: ', p_entity_type, ' #', p_entity_id), p_entity_type, p_entity_id, p_action_name, p_user_id);
+            LEAVE proc_end;
+        END IF;
+
+        -- 4. Для рейсов проверяем active=1 ПЕРЕД поиском действия
+        IF p_entity_type = 'trip' AND p_action_name IN ('trip_vzyat_reis', 'trip_start_trip') THEN
+            SELECT active INTO v_active_flag FROM trips WHERE id = p_entity_id;
+            
+            IF v_active_flag = 0 THEN
+                INSERT IGNORE INTO fsm_errors_log(error_time, error_message, entity_type, entity_id, action_name, user_id)
+                VALUES (NOW(), CONCAT('Trip #', p_entity_id, ' is not active yet (active=0)'), 
+                        p_entity_type, p_entity_id, p_action_name, p_user_id);
+                
+                SELECT CONCAT('ERROR: Trip #', p_entity_id, ' not active yet') AS result;
+                LEAVE proc_end;
+            END IF;
+        END IF;
+
+        -- 5. Находим ID действия
+        SELECT id INTO v_action_id FROM fsm_actions WHERE name = p_action_name;
+        IF v_action_id IS NULL THEN
+            INSERT IGNORE INTO fsm_errors_log(error_time, error_message, entity_type, entity_id, action_name, user_id)
+            VALUES (NOW(), CONCAT('Unknown action: ', p_action_name), p_entity_type, p_entity_id, p_action_name, p_user_id);
+            LEAVE proc_end;
+        END IF;
+
+        /*-- 6. Специальная логика для locker
+        IF p_entity_type = 'locker' THEN
+            -- locker_reset
+            IF p_action_name = 'locker_reset' THEN
+                SELECT id INTO v_locker_id FROM locker_cells
+                WHERE id = p_entity_id AND status IN ('locker_error', 'locker_closed_empty', 'locker_maintenance');
+                IF v_locker_id IS NULL THEN
+                    INSERT IGNORE INTO fsm_errors_log(error_time, error_message, entity_type, entity_id, action_name, user_id)
+                    VALUES (NOW(), CONCAT('Cannot reset locker: invalid state for locker #', p_entity_id), p_entity_type, p_entity_id, p_action_name, p_user_id);
+                    LEAVE proc_end;
+                END IF;
+
+                INSERT INTO hardware_command_log (command, target, success)
+                VALUES ('RESET_LOCKER', CONCAT('cell_', v_locker_id), NULL);
+
+                UPDATE locker_cells
+                SET status = 'locker_free', unlock_code = NULL, code_expires_at = NULL,
+                    reservation_expires_at = NULL, current_order_id = NULL, reserved_for_user_id = NULL, failed_open_attempts = 0
+                WHERE id = v_locker_id;
+
+                INSERT INTO fsm_action_logs(entity_type, entity_id, action_name, from_state, to_state, user_id, created_at)
+                SELECT 'locker', v_locker_id, 'locker_reset', v_current_status, 'locker_free', p_user_id, NOW();
+
+                SELECT CONCAT('Locker cell #', v_locker_id, ' reset and set to free') AS result;
+                LEAVE proc_end;
+            END IF;
+
+            -- locker_cancel_reservation
+            IF p_action_name = 'locker_cancel_reservation' THEN
+                SELECT id INTO v_locker_id FROM locker_cells
+                WHERE id = p_entity_id AND status = 'locker_reserved';
+                IF v_locker_id IS NULL THEN
+                    INSERT IGNORE INTO fsm_errors_log(error_time, error_message, entity_type, entity_id, action_name, user_id)
+                    VALUES (NOW(), CONCAT('Cannot cancel reservation: not reserved, locker #', p_entity_id), p_entity_type, p_entity_id, p_action_name, p_user_id);
+                    LEAVE proc_end;
+                END IF;
+
+                INSERT INTO hardware_command_log (command, target, success)
+                VALUES ('CANCEL_RESERVATION', CONCAT('cell_', v_locker_id), NULL);
+
+                UPDATE locker_cells
+                SET status = 'locker_free', unlock_code = NULL, code_expires_at = NULL,
+                    reservation_expires_at = NULL, current_order_id = NULL, reserved_for_user_id = NULL, failed_open_attempts = 0
+                WHERE id = v_locker_id;
+
+                INSERT INTO fsm_action_logs(entity_type, entity_id, action_name, from_state, to_state, user_id, created_at)
+                SELECT 'locker', v_locker_id, 'locker_cancel_reservation', v_current_status, 'locker_free', p_user_id, NOW();
+
+                SELECT CONCAT('Reservation cancelled for locker cell #', v_locker_id) AS result;
+                LEAVE proc_end;
+            END IF;
+
+            -- locker_open_locker
+            IF p_action_name = 'locker_open_locker' THEN
+                SELECT failed_open_attempts INTO @attempts FROM locker_cells WHERE id = p_entity_id;
+                IF @attempts >= 10 THEN
+                    UPDATE locker_cells SET status = 'locker_error' WHERE id = p_entity_id;
+                    INSERT IGNORE INTO fsm_errors_log(error_time, error_message, entity_type, entity_id, action_name, user_id)
+                    VALUES (NOW(), CONCAT('Locker cell #', p_entity_id, ' blocked due to too many failed attempts'), p_entity_type, p_entity_id, p_action_name, p_user_id);
+                    SELECT CONCAT('Locker cell #', p_entity_id, ' is blocked') AS result;
+                    LEAVE proc_end;
+                END IF;
+
+                SELECT id INTO v_locker_id FROM locker_cells
+                WHERE id = p_entity_id AND unlock_code = p_extra_id AND code_expires_at > NOW() AND status = 'locker_reserved';
+
+                IF v_locker_id IS NULL THEN
+                    UPDATE locker_cells SET failed_open_attempts = failed_open_attempts + 1 WHERE id = p_entity_id;
+                    INSERT IGNORE INTO fsm_errors_log(error_time, error_message, entity_type, entity_id, action_name, user_id)
+                    VALUES (NOW(), CONCAT('Invalid or expired unlock code for locker cell #', p_entity_id), p_entity_type, p_entity_id, p_action_name, p_user_id);
+                    LEAVE proc_end;
+                END IF;
+
+                UPDATE locker_cells SET failed_open_attempts = 0 WHERE id = v_locker_id;
+                INSERT INTO hardware_command_log (command, target, success)
+                VALUES ('OPEN_CELL', CONCAT('cell_', v_locker_id), NULL);
+                UPDATE locker_cells SET status = 'locker_opened' WHERE id = v_locker_id;
+
+                INSERT INTO fsm_action_logs(entity_type, entity_id, action_name, from_state, to_state, user_id, created_at)
+                VALUES ('locker', v_locker_id, 'locker_open_locker', 'locker_reserved', 'locker_opened', p_user_id, NOW());
+
+                SELECT CONCAT('Locker cell #', v_locker_id, ' opened') AS result;
+                LEAVE proc_end;
+            END IF;
+
+            -- locker_close_locker
+            IF p_action_name = 'locker_close_locker' THEN
+                SELECT status INTO v_state FROM locker_cells WHERE id = p_entity_id;
+                IF v_state NOT IN ('locker_parcel_confirmed', 'locker_parcel_pickup_driver', 'locker_parcel_pickup_recipient') THEN
+                    INSERT IGNORE INTO fsm_errors_log(error_time, error_message, entity_type, entity_id, action_name, user_id)
+                    VALUES (NOW(), CONCAT('Cannot close locker: not confirmed, locker cell #', p_entity_id), p_entity_type, p_entity_id, p_action_name, p_user_id);
+                    LEAVE proc_end;
+                END IF;
+
+                INSERT INTO hardware_command_log (command, target, success)
+                VALUES ('CLOSE_CELL', CONCAT('cell_', p_entity_id), NULL);
+
+                UPDATE locker_cells
+                SET status = 'locker_closed_empty', unlock_code = NULL, code_expires_at = NULL,
+                    reservation_expires_at = NULL, current_order_id = NULL, reserved_for_user_id = NULL, failed_open_attempts = 0
+                WHERE id = p_entity_id;
+
+                INSERT INTO fsm_action_logs(entity_type, entity_id, action_name, from_state, to_state, user_id, created_at)
+                VALUES ('locker', p_entity_id, 'locker_close_locker', v_state, 'locker_closed_empty', p_user_id, NOW());
+
+                SELECT CONCAT('Locker cell #', p_entity_id, ' closed') AS result;
+                LEAVE proc_end;
+            END IF;
+        END IF;*/
+
+        -- 7. Находим следующий статус (ИСПРАВЛЕНО: сохраняем в переменную)
+        SELECT t.to_state_id, s2.name 
+        INTO v_next_state_id, v_next_status
+        FROM fsm_transitions t
+        JOIN fsm_states s ON s.id = t.from_state_id
+        JOIN fsm_states s2 ON s2.id = t.to_state_id
+        WHERE s.name = v_current_status AND t.action_id = v_action_id
+        LIMIT 1;
+
+        IF v_next_state_id IS NULL OR v_next_status IS NULL THEN
+            INSERT IGNORE INTO fsm_errors_log(error_time, error_message, entity_type, entity_id, action_name, user_id)
+            VALUES (NOW(), CONCAT('Transition not allowed: ', p_action_name, ' from ', v_current_status), p_entity_type, p_entity_id, p_action_name, p_user_id);
+            SELECT CONCAT('ERROR: No transition for ', p_action_name, ' from state ', v_current_status) AS result;
+            LEAVE proc_end;
+        END IF;
+
+        -- 8. ИСПРАВЛЕНО: Обновляем статус через ПЕРЕМЕННУЮ, а не через подзапрос
+        -- Используем v_next_status (уже загруженный выше)
+        SET @sql_update = CONCAT(
+            'UPDATE ', v_table_name,
+            ' SET ', v_status_field, ' = ''', v_next_status, '''',
+            ' WHERE id = ', p_entity_id
+        );
+        PREPARE stmt_update FROM @sql_update;
+        EXECUTE stmt_update;
+        DEALLOCATE PREPARE stmt_update;
+
+        -- 9. Логируем действие
+        INSERT INTO fsm_action_logs(entity_type, entity_id, action_name, from_state, to_state, user_id, created_at)
+        VALUES (
+            p_entity_type,
+            p_entity_id,
+            p_action_name,
+            v_current_status,
+            v_next_status,
+            p_user_id,
+            NOW()
+        );
+
+        -- 10. Результат
+        SET v_message = CONCAT('FSM action "', p_action_name, '" applied on ', p_entity_type, ' #', p_entity_id, 
+                               ': ', v_current_status, ' → ', v_next_status);
+        SELECT v_message AS result;
+
+    END proc_end;
+END ;;
+DELIMITER ;
+/*!50003 SET sql_mode              = @saved_sql_mode */ ;
+/*!50003 SET character_set_client  = @saved_cs_client */ ;
+/*!50003 SET character_set_results = @saved_cs_results */ ;
+/*!50003 SET collation_connection  = @saved_col_connection */ ;

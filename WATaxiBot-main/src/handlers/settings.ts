@@ -1,0 +1,1461 @@
+import { localizationNames } from "../l10n";
+import { Context } from "../types/Context";
+import {changeLang, changeReferralCode, editUser} from "../api/user";
+import { UsersStorage } from "../storage/usersStorage";
+import { REFCODES } from "../api/constants";
+import axios from "axios";
+import { baseURL, postHeaders } from "../api/general";
+import searchRefCodeByREfID from "../utils/settings";
+import { newSettings } from "../states/machines/settingsMachine";
+import {replace} from "lodash";
+import {pickMaxVersion} from "../types/api/LegalDoc";
+import {getLocalizationText} from "../utils/textUtils";
+
+type LanguageCodeData = {
+    id: string;
+    native: string;
+    api_id: string;
+    iso: string;
+};
+type LanguageCodeListData = LanguageCodeData[];
+const languages: LanguageCodeListData = [
+    {
+        id: "1",
+        native: "Русский",
+        api_id: "1",
+        iso: "ru"
+    },
+    {
+        id: "2",
+        native: "English",
+        api_id: "2",
+        iso: "en"
+    },
+    {
+        id: "3",
+        native: "español",
+        api_id: "3",
+        iso: "es"
+    },
+    {
+        id: "4",
+        native: "Français",
+        api_id: "4",
+        iso: "fr"
+    },
+    {
+        id: "5",
+        native: "الدارجة المغربية",
+        api_id: "24",
+        iso: "ary-Arab"
+    },
+    {
+        id: "6",
+        native: "Darija Maġribiya",
+        api_id: "25",
+        iso: "ary-Latn"
+    },
+    {
+        id: "7",
+        native: "ⵜⴰⵎⴰⵣⵉⵖⵜ",
+        api_id: "26",
+        iso: "zgh-Tfng"
+    },
+    {
+        id: "8",
+        native: "Tamazight",
+        api_id: "27",
+        iso: "zgh-Latn"
+    },
+    {
+        id: "9",
+        native: "العربية",
+        api_id: "28",
+        iso: "ar-Arab"
+    }
+];
+const ChildrenConfigLanguages: LanguageCodeListData = [
+    {
+        id: "8",
+        native: "Русский",
+        api_id: "1",
+        iso: "ru",
+    },
+    {
+        id: "1",
+        native: "English",
+        api_id: "2",
+        iso: "en",
+    },
+    {
+        id: "2",
+        native: "Español",
+        api_id: "3",
+        iso: "es",
+    },
+    {
+        id: "5",
+        native: "Français",
+        api_id: "4",
+        iso: "fr",
+    },
+    {
+        id: "3",
+        native: "Italiano",
+        api_id: "5",
+        iso: "it",
+    },
+    {
+        id: "4",
+        native: "Deutsch",
+        api_id: "6",
+        iso: "de",
+    },
+    {
+        id: "6",
+        native: "Norway",
+        api_id: "7",
+        iso: "no",
+    },
+    {
+        id: "7",
+        native: "Denmark",
+        api_id: "8",
+        iso: "dk",
+    },
+    {
+        id: "9",
+        native: "Sweden",
+        api_id: "9",
+        iso: "se",
+    },
+    {
+        id: "10",
+        native: "Finland",
+        api_id: "10",
+        iso: "fi",
+    },
+];
+async function sendSettingMenu(ctx: Context, user: any) {
+    await ctx.chat.sendMessage(
+        ctx.constants
+            .getPrompt(
+                localizationNames.settingsMenu,
+                ctx.user.settings.lang.api_id,
+            )
+            .replace(
+                "%language%",
+                user.settings.lang.native +
+                "(" +
+                user.settings.lang.iso +
+                ")",
+            )
+            .replace(
+                "%refCode%",
+                searchRefCodeByREfID(user.referrer_u_id, ctx) ??
+                "---",
+            )
+            .replace("%selfRefCode%", user.ref_code ?? "---")
+            .replace(
+                "%prevRefCodeHint%",
+                user.referrer_u_id === "666"
+                    ? ctx.constants
+                    .getPrompt(
+                        localizationNames.settingsPreviousReferralCode,
+                        ctx.user.settings.lang.api_id,
+                    )
+                    .replace(
+                        "%code%",
+                        user.u_details?.refCodeBackup,
+                    ) + "\n"
+                    : "",
+            )
+            .replace(
+                "%testModeHint%",
+                user.referrer_u_id === "666"
+                    ? ctx.constants.getPrompt(
+                        localizationNames.settingsTestModeActive,
+                        ctx.user.settings.lang.api_id,
+                    )
+                    : ctx.constants.getPrompt(
+                        localizationNames.settingsTestModeHint,
+                        ctx.user.settings.lang.api_id,
+                    ),
+            ),
+    );
+}
+
+export async function SettingsHandler(ctx: Context): Promise<void> {
+    const state = await ctx.storage.pull(ctx.userID);
+
+    if (
+        (ctx.message.body.trim() === "0") &&
+        (state.state === "settings" || state.state === "" || !state.state)
+    ) {
+        await ctx.chat.sendMessage(
+            ctx.constants.getPrompt(
+                localizationNames.defaultPrompt,
+                ctx.user.settings.lang.api_id,
+            ),
+        );
+        await ctx.storage.delete(ctx.userID);
+        return;
+    }
+
+    if (state.state === "settings") {
+        switch (ctx.message.body) {
+            case "1":
+                await ctx.chat.sendMessage(
+                    ctx.constants.getPrompt(
+                        localizationNames.selectLanguage,
+                        ctx.user.settings.lang.api_id,
+                    ),
+                );
+                if(ctx.configName==="children"){
+                    const text = "--------------------------------------------------\n" +
+                        "  _*1*        English ............ 🇺🇸 (en)_ +\n" +
+                        "  _*2*        Español ........... 🇪🇸 (es)_ +\n" +
+                        "  _*3*        Italiano ............ 🇮🇹  (it)_  +\n" +
+                        "  _*4*        Deutsch ........... 🇩🇪 (de)_ +\n" +
+                        "  _*5*        Français ........... 🇫🇷  (fr)_ +\n" +
+                        "  _*6*        Norsk ............... 🇳🇴 (nb)_ –\n" +
+                        "  _*7*        Dansk ............... 🇩🇰 (da)_ –\n" +
+                        "  _*8*        Русский ........... 🇷🇺 (ru)_  +\n" +
+                        "  _*9*        Svenska ............ 🇸🇪 (sv)_ –\n" +
+                        "_*10*        Suomi ............... 🇫🇮  (fi)_  –";
+                    await ctx.chat.sendMessage(text);
+                    /*await ctx.chat.sendMessage(
+                        "-----------------------------------------------------\n" +
+                        sortedLanguages
+                            .map((item) => {
+                                // Номер с выравниванием (жирный)
+                                const number = `*${item.id}*`.padStart(3);
+
+                                // Название языка (без форматирования для расчёта длины)
+                                const rawLanguageName = item.native;
+                                const displayLanguageName = rawLanguageName.padEnd(11);
+
+                                // Определяем реальную длину строки без разметки WhatsApp
+                                // (разметка WhatsApp не влияет на физическую длину символов)
+                                const rawTextLength = `${item.id}      ${rawLanguageName}`.length;
+
+                                // Вычисляем сколько нужно пробелов после названия языка
+                                // 19 - позиция, где должен начинаться разделитель "▪︎"
+                                const spacesNeeded = Math.max(1, 19 - rawTextLength);
+                                const spacing = " ".repeat(spacesNeeded);
+
+                                const separator = "▪︎";
+                                const postfix = Number(item.id) <= 5 ? "+" : "-";
+
+                                return `${number}      ${displayLanguageName}${spacing}${separator} (*${item.iso}*) ${postfix}`;
+                            })
+                            .join("\n")
+                    );*/
+                } else {
+                    await ctx.chat.sendMessage(
+                        languages
+                            .map(
+                                (item) =>
+                                    item.native +
+                                    "(" +
+                                    item.iso +
+                                    ")" +
+                                    " - *" +
+                                    item.id +
+                                    "*",
+                            )
+                            .join("\n"),
+                    );
+                }
+                state.state = "changeLanguage";
+                await ctx.storage.push(ctx.userID, state);
+                break;
+            /*
+            case '2':
+                // change referral code
+                await ctx.chat.sendMessage(ctx.constants.getPrompt(localizationNames.newReferralCodeCollection, ctx.user.settings.lang.api_id ))
+                state.state  = 'changeReferralCode';
+                await ctx.storage.push(ctx.userID, state);
+                break;*/
+            case "2":
+                if (ctx.configName === "children") {
+                    const botLegalDocs = JSON.parse(ctx.constants.data.data.site_constants.bot_legal_docs?.value || '{}')
+                    const legal_information_parts = pickMaxVersion(botLegalDocs.legal_information.content)
+                    for (const part of legal_information_parts.parts) {
+                        await ctx.chat.sendMessage(part[ctx.user.settings.lang.api_id].replace('%action%',
+                            ctx.constants.getPrompt(localizationNames.childrenDocsActionContinue,ctx.user.settings.lang.api_id)));
+                        await new Promise(resolve => setTimeout(resolve, 300));
+                    }
+                    state.state = "collectionLegalInformation";
+                    await ctx.storage.push(ctx.userID, state);
+                    break
+                }
+                state.data.docs.legalInformationMessage =
+                    await ctx.chat.sendMessage(
+                        ctx.constants
+                            .getPrompt(
+                                localizationNames.legal_information_settings,
+                                ctx.user.settings.lang.api_id,
+                            )
+                            .replace("%doc%", "")
+                            .replace(
+                                "%action%",
+                                ctx.constants.getPrompt(
+                                    localizationNames.expand_doc,
+                                    ctx.user.settings.lang.api_id,
+                                ),
+                            )
+                            .replace("%next%",
+                                ctx.constants.getPrompt(
+                                    localizationNames.next_step,
+                                    ctx.user.settings.lang.api_id,
+                                )
+                            )
+                    );
+                state.state = "collectionLegalInformation";
+                await ctx.storage.push(ctx.userID, state);
+                break;
+            case "3":
+                const user = await ctx.usersList.pull(ctx.userID);
+                let mode = "default";
+                if (user.referrer_u_id == "666") {
+                    mode = "test";
+                }
+                if (mode === "default") {
+                    const res = await changeReferralCode(
+                        user.api_u_id,
+                        "666",
+                        user.referrer_u_id,
+                        ctx.auth,
+                        ctx.baseURL,
+                    );
+                    await ctx.chat.sendMessage(JSON.stringify(res));
+                    const actualUserData = await axios.post(
+                        `${ctx.baseURL}user`,
+                        {
+                            token: ctx.auth.token,
+                            u_hash: ctx.auth.hash,
+                            u_a_phone: ctx.userID.split("@")[0],
+                        },
+                        { headers: postHeaders },
+                    );
+                    const actualUserDataSection =
+                        actualUserData.data.data.user[
+                            Object.keys(actualUserData.data.data.user)[0]
+                        ];
+                    if (!user.u_details) {
+                        user.u_details = {};
+                    }
+                    user.u_details.refCodeBackup = user.referrer_u_id;
+                    user.referrer_u_id = "666";
+
+                    await ctx.usersList.push(ctx.userID, user);
+                    await ctx.chat.sendMessage(
+                        ctx.constants
+                            .getPrompt(
+                                localizationNames.settingsMenu,
+                                ctx.user.settings.lang.api_id,
+                            )
+                            .replace(
+                                "%language%",
+                                user.settings.lang.native +
+                                    "(" +
+                                    user.settings.lang.iso +
+                                    ")",
+                            )
+                            .replace(
+                                "%refCode%",
+                                searchRefCodeByREfID(
+                                    actualUserDataSection?.referrer_u_id,
+                                    ctx,
+                                ) ?? "---",
+                            )
+                            .replace("%selfRefCode%", user.ref_code ?? "---")
+                            .replace(
+                                "%testModeHint%",
+                                ctx.constants.getPrompt(
+                                    localizationNames.settingsTestModeActive,
+                                    ctx.user.settings.lang.api_id,
+                                ),
+                            ),
+                    );
+                } else if (mode === "test") {
+                    const res = await changeReferralCode(
+                        user.api_u_id,
+                        user.u_details?.refCodeBackup,
+                        "666",
+                        ctx.auth,
+                        ctx.baseURL,
+                    );
+                    await ctx.chat.sendMessage(JSON.stringify(res));
+                    const actualUserData = await axios.post(
+                        `${ctx.baseURL}user`,
+                        {
+                            token: ctx.auth.token,
+                            u_hash: ctx.auth.hash,
+                            u_a_phone: ctx.userID.split("@")[0],
+                        },
+                        { headers: postHeaders },
+                    );
+                    const actualUserDataSection =
+                        actualUserData.data.data.user[
+                            Object.keys(actualUserData.data.data.user)[0]
+                        ];
+                    console.log(actualUserDataSection);
+                    if (!user.u_details) {
+                        user.u_details = {};
+                    }
+                    user.referrer_u_id = user.u_details?.refCodeBackup;
+                    user.u_details.refCodeBackup = "666";
+                    await ctx.usersList.push(ctx.userID, user);
+
+                    await ctx.chat.sendMessage(
+                        ctx.constants
+                            .getPrompt(
+                                localizationNames.settingsMenu,
+                                ctx.user.settings.lang.api_id,
+                            )
+                            .replace(
+                                "%language%",
+                                user.settings.lang.native +
+                                    "(" +
+                                    user.settings.lang.iso +
+                                    ")",
+                            )
+                            .replace(
+                                "%refCode%",
+                                searchRefCodeByREfID(
+                                    actualUserDataSection?.referrer_u_id,
+                                    ctx,
+                                ) ?? "---",
+                            )
+                            .replace("%selfRefCode%", user.ref_code ?? "---")
+                            .replace(
+                                "%testModeHint%",
+                                ctx.constants.getPrompt(
+                                    localizationNames.settingsTestModeHint,
+                                    ctx.user.settings.lang.api_id,
+                                ),
+                            ),
+                    );
+                }
+                state.state = "settings";
+                await ctx.storage.push(ctx.userID, state);
+                break;
+            case "4":
+                await ctx.chat.sendMessage(
+                    ctx.constants.getPrompt(
+                        localizationNames.askDeleteAccount,
+                        ctx.user.settings.lang.api_id,
+                    ),
+                );
+                state.state = "deleteAccount";
+                await ctx.storage.push(ctx.userID, state);
+                break;
+            case "5":
+                if(ctx.configName === "children") {
+                    await ctx.chat.sendMessage(ctx.constants.getPrompt(localizationNames.enterFirstNameLastNameAndBirthYear, ctx.user.settings.lang.api_id));
+                    state.state = "children_collectionFullNameAndBirthYear";
+                    await ctx.storage.push(ctx.userID, state);
+                    break
+                }
+                state.data.docs.privacyPolicyMessage =
+                    await ctx.chat.sendMessage(
+                        ctx.constants
+                            .getPrompt(
+                                localizationNames.privacy_policy_settings,
+                                ctx.user.settings.lang.api_id,
+                            )
+                            .replace("%doc%", "")
+                            .replace(
+                                "%action%",
+                                ctx.constants.getPrompt(
+                                    localizationNames.expand_doc,
+                                    ctx.user.settings.lang.api_id,
+                                ),
+                            )
+                            .replace("%next%",
+                                ctx.constants.getPrompt(
+                                    localizationNames.next_step,
+                                    ctx.user.settings.lang.api_id,
+                                )
+                            )
+                    );
+                state.state = "collectionPrivacyPolicy";
+                await ctx.storage.push(ctx.userID, state);
+                break;
+            case "6":
+                if(ctx.configName === "children") {
+                    await ctx.chat.sendMessage(ctx.constants.getPrompt(localizationNames.enterPhoneNumber, ctx.user.settings.lang.api_id));
+                    state.state = "children_collectionPhone";
+                    await ctx.storage.push(ctx.userID, state);
+                    break
+                }
+                state.data.docs.publicOffersMessage =
+                    await ctx.chat.sendMessage(
+                        ctx.constants
+                            .getPrompt(
+                                localizationNames.public_offers_settings,
+                                ctx.user.settings.lang.api_id,
+                            )
+                            .replace("%doc%", "")
+                            .replace(
+                                "%action%",
+                                ctx.constants.getPrompt(
+                                    localizationNames.expand_doc,
+                                    ctx.user.settings.lang.api_id,
+                                ),
+                            )
+                            .replace("%next%",
+                                ctx.constants.getPrompt(
+                                    localizationNames.next_step,
+                                    ctx.user.settings.lang.api_id,
+                                )
+                            )
+                    );
+                state.state = "collectionPublicOffers";
+                await ctx.storage.push(ctx.userID, state);
+                break;
+            case "7":
+                if(ctx.configName === "children") {
+                    await ctx.chat.sendMessage(ctx.constants.getPrompt(localizationNames.enterCity, ctx.user.settings.lang.api_id));
+                    state.state = "children_collectionCity";
+                    await ctx.storage.push(ctx.userID, state);
+                    break
+                }
+                await ctx.chat.sendMessage(ctx.constants.getPrompt(localizationNames.commandNotFound, ctx.user.settings.lang.api_id))
+                break
+            default:
+                await ctx.chat.sendMessage(
+                    ctx.constants.getPrompt(
+                        localizationNames.commandNotFound,
+                        ctx.user.settings.lang.api_id,
+                    ),
+                );
+                break;
+        }
+        return;
+    }
+    const user = await ctx.usersList.pull(ctx.userID);
+    switch (state.state) {
+        case "changeLanguage":
+            let langs_data = ctx.configName === "children" ? ChildrenConfigLanguages : languages;
+            console.log(
+                ctx.message.body,
+                langs_data.map((item) => item.id),
+                ctx.message.body.toString() in langs_data.map((item) => item.id),
+                langs_data.find((item) => item.id == ctx.message.body)
+            );
+            const userPreload = await ctx.usersList.pull(ctx.userID);
+            if (
+                ctx.message.body.trim() === "0"
+            ) {
+                state.state = "settings";
+                await ctx.storage.push(ctx.userID, state);
+                await ctx.chat.sendMessage(
+                    ctx.constants
+                        .getPrompt(
+                            localizationNames.settingsMenu,
+                            ctx.user.settings.lang.api_id,
+                        )
+                        .replace(
+                            "%language%",
+                            userPreload.settings.lang.native +
+                                "(" +
+                                userPreload.settings.lang.iso +
+                                ")",
+                        )
+                        .replace(
+                            "%refCode%",
+                            searchRefCodeByREfID(
+                                userPreload.referrer_u_id,
+                                ctx,
+                            ) ?? "---",
+                        )
+                        .replace("%selfRefCode%", userPreload.ref_code ?? "---")
+                        .replace(
+                            "%prevRefCodeHint%",
+                            userPreload.referrer_u_id === "666"
+                                ? ctx.constants
+                                      .getPrompt(
+                                          localizationNames.settingsPreviousReferralCode,
+                                          ctx.user.settings.lang.api_id,
+                                      )
+                                      .replace(
+                                          "%code%",
+                                          userPreload.u_details?.refCodeBackup,
+                                      ) + "\n"
+                                : "",
+                        )
+                        .replace(
+                            "%testModeHint%",
+                            userPreload.referrer_u_id === "666"
+                                ? ctx.constants.getPrompt(
+                                      localizationNames.settingsTestModeActive,
+                                      ctx.user.settings.lang.api_id,
+                                  )
+                                : ctx.constants.getPrompt(
+                                      localizationNames.settingsTestModeHint,
+                                      ctx.user.settings.lang.api_id,
+                                  ),
+                        ),
+                );
+                break;
+            }
+            if (langs_data.map((item) => item.id).includes(ctx.message.body)) {
+                if (ctx.message.body !== (ctx.configName==="children"?"8":"1") && ctx.configName !== "gruzvill") {
+                    await ctx.chat.sendMessage(
+                        ctx.constants.getPrompt(
+                            localizationNames.commandNotFound,
+                            ctx.user.settings.lang.api_id,
+                        ),
+                    );
+                    state.state = "changeLanguage";
+                    await ctx.storage.push(ctx.userID, state);
+                    break;
+                }
+                const response = await changeLang(
+                    ctx.userID.split("@")[0],
+                    langs_data.find((item) => item.id == ctx.message.body)
+                        ?.api_id ?? "-1",
+                    ctx.auth,
+                    ctx.baseURL,
+                );
+                console.log(response);
+
+                if (
+                    response.status === "success" ||
+                    (response.message === "user or modified data not found" ||  response.message ==="allowed data not found")
+                ) {
+                    state.state = "settings";
+                    await ctx.storage.push(ctx.userID, state);
+
+                    const selectedLang = langs_data.find(
+                        (item) => item.id == ctx.message.body,
+                    );
+
+                    const user = await ctx.usersList.pull(ctx.userID);
+                    user.reloadFromApi = true;
+                    user.settings.lang.iso = selectedLang?.iso ?? "en";
+                    user.settings.lang.native =
+                        selectedLang?.native ?? "English(en)";
+                    user.settings.lang.api_id = selectedLang?.api_id ?? "2";
+                    await ctx.usersList.push(ctx.userID, user);
+                    await ctx.chat.sendMessage(
+                        ctx.constants.getPrompt(
+                            localizationNames.langSelectedBakingToSettings,
+                            ctx.user.settings.lang.api_id,
+                        ).replace("%lang%",user.settings.lang.iso.toUpperCase()),
+                    );
+                    await ctx.chat.sendMessage(
+                        ctx.constants
+                            .getPrompt(
+                                localizationNames.settingsMenu,
+                                ctx.user.settings.lang.api_id,
+                            )
+                            .replace(
+                                "%language%",
+                                user.settings.lang.native +
+                                    "(" +
+                                    user.settings.lang.iso +
+                                    ")",
+                            )
+                            .replace(
+                                "%refCode%",
+                                searchRefCodeByREfID(user.referrer_u_id, ctx) ??
+                                    "---",
+                            )
+                            .replace("%selfRefCode%", user.ref_code ?? "---")
+                            .replace(
+                                "%prevRefCodeHint%",
+                                user.referrer_u_id === "666"
+                                    ? ctx.constants
+                                          .getPrompt(
+                                              localizationNames.settingsPreviousReferralCode,
+                                              ctx.user.settings.lang.api_id,
+                                          )
+                                          .replace(
+                                              "%code%",
+                                              searchRefCodeByREfID(
+                                                  user.u_details?.refCodeBackup,
+                                                  ctx,
+                                              ),
+                                          ) + "\n"
+                                    : "",
+                            )
+                            .replace(
+                                "%testModeHint%",
+                                user.referrer_u_id === "666"
+                                    ? ctx.constants.getPrompt(
+                                          localizationNames.settingsTestModeActive,
+                                          ctx.user.settings.lang.api_id,
+                                      )
+                                    : ctx.constants.getPrompt(
+                                          localizationNames.settingsTestModeHint,
+                                          ctx.user.settings.lang.api_id,
+                                      ),
+                            ),
+                    );
+                    break;
+                }
+                await ctx.chat.sendMessage(
+                    ctx.constants.getPrompt(
+                        localizationNames.error,
+                        ctx.user.settings.lang.api_id,
+                    ),
+                );
+                break;
+            } else {
+                await ctx.chat.sendMessage(
+                    ctx.constants.getPrompt(
+                        localizationNames.commandNotFound,
+                        ctx.user.settings.lang.api_id,
+                    ),
+                );
+            }
+            break;
+        case "changeReferralCode":
+            console.log("changeReferralCode: ", ctx.message.body, user);
+
+            if (
+                ctx.message.body ===
+                    ctx.constants.getPrompt(
+                        localizationNames.cancelLower,
+                        ctx.user.settings.lang.api_id,
+                    ) ||
+                ctx.message.body ===
+                    ctx.constants.getPrompt(
+                        localizationNames.cancelDigital,
+                        ctx.user.settings.lang.api_id,
+                    )
+            ) {
+                state.state = "settings";
+                await ctx.storage.push(ctx.userID, state);
+                await ctx.chat.sendMessage(
+                    ctx.constants
+                        .getPrompt(
+                            localizationNames.settingsMenu,
+                            ctx.user.settings.lang.api_id,
+                        )
+                        .replace(
+                            "%language%",
+                            user.settings.lang.native +
+                                "(" +
+                                user.settings.lang.iso +
+                                ")",
+                        )
+                        .replace(
+                            "%refCode%",
+                            searchRefCodeByREfID(user.referrer_u_id, ctx) ??
+                                "---",
+                        )
+                        .replace("%selfRefCode%", user.ref_code ?? "---")
+                        .replace(
+                            "%prevRefCodeHint%",
+                            user.referrer_u_id === "666"
+                                ? ctx.constants
+                                      .getPrompt(
+                                          localizationNames.settingsPreviousReferralCode,
+                                          ctx.user.settings.lang.api_id,
+                                      )
+                                      .replace(
+                                          "%code%",
+                                          user.u_details?.refCodeBackup,
+                                      ) + "\n"
+                                : "",
+                        )
+                        .replace(
+                            "%testModeHint%",
+                            user.referrer_u_id === "666"
+                                ? ctx.constants.getPrompt(
+                                      localizationNames.settingsTestModeActive,
+                                      ctx.user.settings.lang.api_id,
+                                  )
+                                : ctx.constants.getPrompt(
+                                      localizationNames.settingsTestModeHint,
+                                      ctx.user.settings.lang.api_id,
+                                  ),
+                        ),
+                );
+                break;
+            }
+            const refCode = REFCODES[ctx.message.body] ?? ctx.message.body;
+
+            //detect test mode
+            if (user.referrer_u_id === "666") {
+                await ctx.chat.sendMessage(
+                    "Смена рефкода в режиме теста нвеозможна, отключите тестовый режим в настройках",
+                );
+                state.state = "settings";
+                await ctx.storage.push(ctx.userID, state);
+                await ctx.chat.sendMessage(
+                    ctx.constants
+                        .getPrompt(
+                            localizationNames.settingsMenu,
+                            ctx.user.settings.lang.api_id,
+                        )
+                        .replace(
+                            "%language%",
+                            ctx.user.settings.lang.native +
+                                "(" +
+                            ctx.user.settings.lang.iso +
+                                ")",
+                        )
+                        .replace(
+                            "%refCode%",
+                            searchRefCodeByREfID(user.referrer_u_id, ctx) ??
+                                "---",
+                        )
+                        .replace("%selfRefCode%", user.ref_code ?? "---")
+                        .replace(
+                            "%prevRefCodeHint%",
+                            user.referrer_u_id === "666"
+                                ? ctx.constants
+                                      .getPrompt(
+                                          localizationNames.settingsPreviousReferralCode,
+                                          ctx.user.settings.lang.api_id,
+                                      )
+                                      .replace(
+                                          "%code%",
+                                          user.u_details?.refCodeBackup,
+                                      ) + "\n"
+                                : "",
+                        )
+                        .replace(
+                            "%testModeHint%",
+                            user.referrer_u_id === "666"
+                                ? ctx.constants.getPrompt(
+                                      localizationNames.settingsTestModeActive,
+                                      ctx.user.settings.lang.api_id,
+                                  )
+                                : ctx.constants.getPrompt(
+                                      localizationNames.settingsTestModeHint,
+                                      ctx.user.settings.lang.api_id,
+                                  ),
+                        ),
+                );
+                break;
+                /*
+                if(refCode != user.u_details?.refCodeBackup){
+                    ///await ctx.chat.sendMessage("PREV CODE: " + user.u_details?.refCodeBackup + '\n' + "NEW CODE: " + refCode + '\nCUR CODE: ' + user.referrer_u_id);
+                    await ctx.chat.sendMessage(ctx.constants.getPrompt(localizationNames.settingsExitTestModeError, ctx.user.settings.lang.api_id ));
+                    state.state = 'settings';
+                    await ctx.storage.push(ctx.userID, state);
+                    await ctx.chat.sendMessage(ctx.constants.getPrompt(localizationNames.settingsMenu, ctx.user.settings.lang.api_id )
+                        .replace( '%language%', user.settings.lang.native + '(' + user.settings.lang.iso + ')')
+                        .replace( '%refCode%', searchRefCodeByREfID(user.referrer_u_id) ?? '---')
+                        .replace('%selfRefCode%', user.ref_code ?? '---')
+                        .replace('%prevRefCodeHint%', user.referrer_u_id === '666' ?
+                            ctx.constants.getPrompt(localizationNames.settingsPreviousReferralCode, ctx.user.settings.lang.api_id ).replace('%code%',user.u_details?.refCodeBackup) + '\n': '')
+                        .replace('%testModeHint%', user.referrer_u_id === '666' ? ctx.constants.getPrompt(localizationNames.settingsTestModeActive, ctx.user.settings.lang.api_id ) :
+                            ctx.constants.getPrompt(localizationNames.settingsTestModeHint, ctx.user.settings.lang.api_id ))
+                    );
+                    break;
+                }
+                */
+            }
+
+            console.log(user.api_u_id, refCode, user.referrer_u_id, ctx.auth);
+            const response = await changeReferralCode(
+                user.api_u_id,
+                refCode,
+                user.referrer_u_id,
+                ctx.auth,
+                ctx.baseURL,
+            );
+            if (response.status === "success") {
+                const actualUserData = await axios.post(
+                    `${ctx.baseURL}user`,
+                    {
+                        token: ctx.auth.token,
+                        u_hash: ctx.auth.hash,
+                        u_a_phone: ctx.userID.split("@")[0],
+                    },
+                    { headers: postHeaders },
+                );
+                const actualUserDataSection =
+                    actualUserData.data.data.user[
+                        Object.keys(actualUserData.data.data.user)[0]
+                    ];
+                await ctx.chat.sendMessage(
+                    ctx.constants.getPrompt(
+                        localizationNames.changeReferralCodeSuccess,
+                        ctx.user.settings.lang.api_id,
+                    ),
+                );
+                await ctx.chat.sendMessage(
+                    ctx.constants
+                        .getPrompt(
+                            localizationNames.settingsMenu,
+                            ctx.user.settings.lang.api_id,
+                        )
+                        .replace(
+                            "%language%",
+                            user.settings.lang.native +
+                                "(" +
+                                user.settings.lang.iso +
+                                ")",
+                        )
+                        .replace(
+                            "%refCode%",
+                            searchRefCodeByREfID(
+                                actualUserDataSection.referrer_u_id,
+                                ctx,
+                            ) ?? "---",
+                        )
+                        .replace(
+                            "%selfRefCode%",
+                            actualUserDataSection.ref_code ?? "---",
+                        )
+                        .replace(
+                            "%prevRefCodeHint%",
+                            actualUserDataSection.referrer_u_id === "666"
+                                ? ctx.constants
+                                      .getPrompt(
+                                          localizationNames.settingsPreviousReferralCode,
+                                          ctx.user.settings.lang.api_id,
+                                      )
+                                      .replace(
+                                          "%code%",
+                                          actualUserDataSection.u_details
+                                              ?.refCodeBackup,
+                                      ) + "\n"
+                                : "",
+                        )
+                        .replace(
+                            "%testModeHint%",
+                            actualUserDataSection.referrer_u_id === "666"
+                                ? ctx.constants.getPrompt(
+                                      localizationNames.settingsTestModeActive,
+                                      ctx.user.settings.lang.api_id,
+                                  )
+                                : ctx.constants.getPrompt(
+                                      localizationNames.settingsTestModeHint,
+                                      ctx.user.settings.lang.api_id,
+                                  ),
+                        ),
+                );
+                state.state = "settings";
+                user.referrer_u_id = refCode;
+                await ctx.usersList.push(ctx.userID, user);
+                await ctx.storage.push(ctx.userID, state);
+                break;
+            } else if (response.message === "user or modified data not found") {
+                await ctx.chat.sendMessage(
+                    ctx.constants.getPrompt(
+                        localizationNames.changeReferralCodeErrorEqual,
+                        ctx.user.settings.lang.api_id,
+                    ),
+                );
+                await ctx.chat.sendMessage(
+                    ctx.constants
+                        .getPrompt(
+                            localizationNames.settingsMenu,
+                            ctx.user.settings.lang.api_id,
+                        )
+                        .replace(
+                            "%language%",
+                            user.settings.lang.native +
+                                "(" +
+                                user.settings.lang.iso +
+                                ")",
+                        )
+                        .replace(
+                            "%refCode%",
+                            searchRefCodeByREfID(user.referrer_u_id, ctx) ??
+                                "---",
+                        )
+                        .replace("%selfRefCode%", user.ref_code ?? "---")
+                        .replace(
+                            "%prevRefCodeHint%",
+                            user.referrer_u_id === "666"
+                                ? ctx.constants
+                                      .getPrompt(
+                                          localizationNames.settingsPreviousReferralCode,
+                                          ctx.user.settings.lang.api_id,
+                                      )
+                                      .replace(
+                                          "%code%",
+                                          user.u_details?.refCodeBackup,
+                                      ) + "\n"
+                                : "",
+                        )
+                        .replace(
+                            "%testModeHint%",
+                            user.referrer_u_id === "666"
+                                ? ctx.constants.getPrompt(
+                                      localizationNames.settingsTestModeActive,
+                                      ctx.user.settings.lang.api_id,
+                                  )
+                                : ctx.constants.getPrompt(
+                                      localizationNames.settingsTestModeHint,
+                                      ctx.user.settings.lang.api_id,
+                                  ),
+                        ),
+                );
+                state.state = "settings";
+                await ctx.storage.push(ctx.userID, state);
+                break;
+            } else {
+                await ctx.chat.sendMessage(
+                    ctx.constants.getPrompt(
+                        localizationNames.invalidReferralCode,
+                        ctx.user.settings.lang.api_id,
+                    ),
+                );
+                state.state = "settings";
+                await ctx.storage.push(ctx.userID, state);
+                await ctx.chat.sendMessage(
+                    ctx.constants
+                        .getPrompt(
+                            localizationNames.settingsMenu,
+                            ctx.user.settings.lang.api_id,
+                        )
+                        .replace(
+                            "%language%",
+                            user.settings.lang.native +
+                                "(" +
+                                user.settings.lang.iso +
+                                ")",
+                        )
+                        .replace(
+                            "%refCode%",
+                            searchRefCodeByREfID(user.referrer_u_id, ctx) ??
+                                "---",
+                        )
+                        .replace("%selfRefCode%", user.ref_code ?? "---")
+                        .replace(
+                            "%prevRefCodeHint%",
+                            user.referrer_u_id === "666"
+                                ? ctx.constants
+                                      .getPrompt(
+                                          localizationNames.settingsPreviousReferralCode,
+                                          ctx.user.settings.lang.api_id,
+                                      )
+                                      .replace(
+                                          "%code%",
+                                          user.u_details?.refCodeBackup,
+                                      ) + "\n"
+                                : "",
+                        )
+                        .replace(
+                            "%testModeHint%",
+                            user.referrer_u_id === "666"
+                                ? ctx.constants.getPrompt(
+                                      localizationNames.settingsTestModeActive,
+                                      ctx.user.settings.lang.api_id,
+                                  )
+                                : ctx.constants.getPrompt(
+                                      localizationNames.settingsTestModeHint,
+                                      ctx.user.settings.lang.api_id,
+                                  ),
+                        ),
+                );
+                break;
+            }
+        case "collectionLegalInformation":
+            if(ctx.configName === "children") {
+                if(ctx.message.body === "1") {
+                    await sendSettingMenu(ctx,user)
+                    state.state = "settings";
+                    await ctx.storage.push(ctx.userID, state);
+                }
+                else {
+                    await ctx.chat.sendMessage(getLocalizationText(ctx,localizationNames.commandNotFound))
+                    break
+                }
+                break
+            }
+
+            if (ctx.message.body === "1") {
+                await sendSettingMenu(ctx,user);
+
+                await ctx.storage.push(ctx.userID, newSettings());
+                break;
+            }
+            else if (ctx.message.body === "3") {
+                state.data.docs.legalInformationExpanded =
+                    !state.data.docs.legalInformationExpanded;
+
+                await state.data.docs.legalInformationMessage?.edit(
+                    ctx.constants
+                        .getPrompt(
+                            localizationNames.legal_information_settings,
+                            ctx.user.settings.lang.api_id,
+                        )
+                        .replace(
+                            "%doc%",
+                            state.data.docs.legalInformationExpanded
+                                ? ctx.constants.getPrompt(
+                                      localizationNames.legal_information_big,
+                                      ctx.user.settings.lang.api_id,
+                                  )
+                                : "",
+                        )
+                        .replace(
+                            "%action%",
+                            ctx.constants.getPrompt(
+                                state.data.docs.legalInformationExpanded
+                                    ? localizationNames.collapse_doc
+                                    : localizationNames.expand_doc,
+                                ctx.user.settings.lang.api_id,
+                            ),
+                        )
+                        .replace(
+                            "%next%",
+                            ctx.constants.getPrompt(
+                                localizationNames.next_step,
+                                ctx.user.settings.lang.api_id,
+                            ),
+                        ),
+                );
+
+                await ctx.storage.push(ctx.userID, state);
+                break;
+            } else {
+                await ctx.chat.sendMessage(
+                    ctx.constants.getPrompt(
+                        localizationNames.commandNotFound,
+                        ctx.user.settings.lang.api_id,
+                    ),
+                );
+            }
+            break;
+
+        case "collectionPrivacyPolicy":
+            if (ctx.message.body === "1") {
+                await sendSettingMenu(ctx,user);
+
+                await ctx.storage.push(ctx.userID, newSettings());
+                break;
+            } else if (ctx.message.body === "3") {
+                state.data.docs.privacyPolicyExpanded =
+                    !state.data.docs.privacyPolicyExpanded;
+                await new Promise((f) =>
+                    setTimeout(
+                        f,
+                        state?.data.docs.privacyPolicyExpanded ? 500 : 500,
+                    ),
+                );
+
+                await state.data.docs.privacyPolicyMessage?.edit(
+                    ctx.constants
+                        .getPrompt(
+                            localizationNames.privacy_policy_settings,
+                            ctx.user.settings.lang.api_id,
+                        )
+                        .replace(
+                            "%doc%",
+                            state.data.docs.privacyPolicyExpanded
+                                ? ctx.constants.getPrompt(
+                                    localizationNames.privacy_policy_big,
+                                    ctx.user.settings.lang.api_id,
+                                )
+                                : "",
+                        )
+                        .replace(
+                            "%action%",
+                            ctx.constants.getPrompt(
+                                state.data.docs.privacyPolicyExpanded
+                                    ? localizationNames.collapse_doc
+                                    : localizationNames.expand_doc,
+                                ctx.user.settings.lang.api_id,
+                            ),
+                        )
+                        .replace("%next%",
+                            ctx.constants.getPrompt(
+                                localizationNames.next_step,
+                                ctx.user.settings.lang.api_id,
+                            )
+                        )
+                );
+
+                await ctx.storage.push(ctx.userID, state);
+                break;
+            } else {
+                await ctx.chat.sendMessage(
+                    ctx.constants.getPrompt(
+                        localizationNames.commandNotFound,
+                        ctx.user.settings.lang.api_id,
+                    ),
+                );
+            }
+            break;
+
+        case "collectionPublicOffers":
+            if (ctx.message.body === "1") {
+                await sendSettingMenu(ctx,user);
+
+                await ctx.storage.push(ctx.userID, newSettings());
+                break;
+            } else if (ctx.message.body === "3") {
+                state.data.docs.publicOffersExpanded =
+                    !state.data.docs.publicOffersExpanded;
+                await new Promise((f) =>
+                    setTimeout(
+                        f,
+                        state?.data.docs.publicOffersExpanded ? 500 : 500,
+                    ),
+                );
+                console.log('111111111',state.data.docs.publicOffersMessage)
+
+                await state.data.docs.publicOffersMessage?.edit(
+                    ctx.constants
+                        .getPrompt(
+                            localizationNames.public_offers_settings,
+                            ctx.user.settings.lang.api_id,
+                        )
+                        .replace(
+                            "%doc%",
+                            state.data.docs.publicOffersExpanded
+                                ? ctx.constants.getPrompt(
+                                    localizationNames.public_offers_big,
+                                    ctx.user.settings.lang.api_id,
+                                )
+                                : "",
+                        )
+                        .replace(
+                            "%action%",
+                            ctx.constants.getPrompt(
+                                state.data.docs.publicOffersExpanded
+                                    ? localizationNames.collapse_doc
+                                    : localizationNames.expand_doc,
+                                ctx.user.settings.lang.api_id,
+                            ),
+                        )
+                        .replace("%next%",
+                            ctx.constants.getPrompt(
+                                localizationNames.next_step,
+                                ctx.user.settings.lang.api_id,
+                            )
+                        )
+                );
+
+                await ctx.storage.push(ctx.userID, state);
+                break;
+            } else {
+                await ctx.chat.sendMessage(
+                    ctx.constants.getPrompt(
+                        localizationNames.commandNotFound,
+                        ctx.user.settings.lang.api_id,
+                    ),
+                );
+            }
+            break;
+        case "deleteAccount":
+            if (ctx.message.body === "1") {
+                await ctx.chat.sendMessage(
+                    ctx.constants.getPrompt(
+                        localizationNames.accountDeleted,
+                        ctx.user.settings.lang.api_id,
+                    ),
+                );
+                if(ctx.configName==="children"){
+                    const res = await editUser(
+                        ctx.userID.split("@")[0],
+                        {
+                            u_details: [
+                                ['-', ["birthYear"]],
+                                ['-', ['phone']],
+                                ['-', ['cityString']],
+                                ['=', ["deleted"], '1']
+                            ],
+                            u_name: state.data.fullName,
+                        },
+                        ctx.auth,
+                        ctx.baseURL
+                    )
+                    console.log('Deleting user: ', res)
+                    await ctx.usersList.delete(ctx.userID)
+                    await ctx.storage.delete(ctx.userID);
+                    return
+
+
+                }
+                state.id = "register";
+                state.state = "previouslyDeleted";
+                await ctx.storage.push(ctx.userID, state);
+            } else if (ctx.message.body === "2") {
+                await ctx.chat.sendMessage(
+                    ctx.constants.getPrompt(
+                        localizationNames.accountDeletionCanceled,
+                        ctx.user.settings.lang.api_id,
+                    ),
+                );
+                await ctx.chat.sendMessage(
+                    ctx.constants
+                        .getPrompt(
+                            localizationNames.settingsMenu,
+                            ctx.user.settings.lang.api_id,
+                        )
+                        .replace(
+                            "%language%",
+                            user.settings.lang.native +
+                                "(" +
+                                user.settings.lang.iso +
+                                ")",
+                        )
+                        .replace(
+                            "%refCode%",
+                            searchRefCodeByREfID(user.referrer_u_id, ctx) ??
+                                "---",
+                        )
+                        .replace("%selfRefCode%", user.ref_code ?? "---")
+                        .replace(
+                            "%prevRefCodeHint%",
+                            user.referrer_u_id === "666"
+                                ? ctx.constants
+                                      .getPrompt(
+                                          localizationNames.settingsPreviousReferralCode,
+                                          ctx.user.settings.lang.api_id,
+                                      )
+                                      .replace(
+                                          "%code%",
+                                          searchRefCodeByREfID(
+                                              user.u_details?.refCodeBackup,
+                                              ctx,
+                                          ),
+                                      ) + "\n"
+                                : "",
+                        )
+                        .replace(
+                            "%testModeHint%",
+                            user.referrer_u_id === "666"
+                                ? ctx.constants.getPrompt(
+                                      localizationNames.settingsTestModeActive,
+                                      ctx.user.settings.lang.api_id,
+                                  )
+                                : ctx.constants.getPrompt(
+                                      localizationNames.settingsTestModeHint,
+                                      ctx.user.settings.lang.api_id,
+                                  ),
+                        ),
+                );
+                state.state = "settings";
+                await ctx.storage.push(ctx.userID, state);
+            } else {
+                await ctx.chat.sendMessage(
+                    ctx.constants.getPrompt(
+                        localizationNames.commandNotFound,
+                        ctx.user.settings.lang.api_id,
+                    ),
+                );
+            }
+
+            break;
+
+        case "children_collectionFullNameAndBirthYear":
+            const body = ctx.message.body.split(" ");
+            if(body.length != 3){
+                await ctx.chat.sendMessage(
+                    ctx.constants.getPrompt(
+                        localizationNames.enterFirstNameLastNameAndBirthYearError,
+                        ctx.user.settings.lang.api_id,
+                    )
+                );
+                break;
+            }
+            if (!body[2].trim().match(/^[0-9]{4}$/)) {  // age not specified in 4 digits
+                await ctx.chat.sendMessage(
+                    ctx.constants.getPrompt(
+                        localizationNames.enterFirstNameLastNameAndBirthYearError,
+                        ctx.user.settings.lang.api_id,
+                    )
+                );
+                break;
+            }
+            if( new Date().getFullYear() - Number(body[2].trim()) < 18 ) {
+                await ctx.chat.sendMessage(
+                    ctx.constants.getPrompt(
+                        localizationNames.enterFirstNameLastNameAndBirthYearError,
+                        ctx.user.settings.lang.api_id,
+                    )
+                )
+                return
+            }
+
+            state.data.fullName = `${body[0]} ${body[1]}`;
+            state.data.birthYear = body[2].trim();
+
+            const res_name_and_year = await editUser(
+                ctx.userID.split("@")[0],
+                {
+                    u_name: state.data.fullName,
+                    u_details: [
+                        ['=',['birthYear'],state.data.birthYear]
+                    ]
+                },
+                ctx.auth,
+                ctx.baseURL
+            )
+            if(res_name_and_year.status === "success") {
+                await sendSettingMenu(ctx,user)
+                state.state = "settings"
+                await ctx.storage.push(ctx.userID, state)
+                break
+            } else {
+                await ctx.chat.sendMessage("Error, dump: " + JSON.stringify(res_name_and_year));
+                await ctx.chat.sendMessage(ctx.constants.getPrompt(localizationNames.defaultPrompt, ctx.user.settings.lang.api_id))
+                console.log('Cannot change user name+age, dump:', JSON.stringify(res_name_and_year))
+                await ctx.storage.delete(ctx.userID)
+            }
+            break;
+        case "children_collectionCity":
+            const city = ctx.message.body
+            const res_city = await editUser(
+                ctx.userID.split("@")[0],
+                {
+                    u_details: [
+                        ['=',['cityString'],city]
+                    ]
+                },
+                ctx.auth,
+                ctx.baseURL
+            )
+            if(res_city.status === "success") {
+                await sendSettingMenu(ctx,user)
+                state.state = "settings"
+                await ctx.storage.push(ctx.userID, state)
+                break
+            } else {
+                await ctx.chat.sendMessage("Error, dump: " + JSON.stringify(res_city));
+                await ctx.chat.sendMessage(ctx.constants.getPrompt(localizationNames.defaultPrompt, ctx.user.settings.lang.api_id))
+                console.log('Cannot change user city, dump:',JSON.stringify(res_city))
+                await ctx.storage.delete(ctx.userID)
+            }
+            break
+        case "children_collectionPhone":
+            const phone = ctx.message.body.trim()
+            if(phone==="0"){
+                await sendSettingMenu(ctx,user)
+                state.state = "settings"
+                await ctx.storage.push(ctx.userID, state)
+                break
+            }
+            const res_phone = await editUser(
+                ctx.userID.split("@")[0],
+                {
+                    u_details: [
+                        ['=',['phone'],phone]
+                    ]
+                },
+                ctx.auth,
+                ctx.baseURL
+            )
+            if(res_phone.status === "success") {
+                await sendSettingMenu(ctx,user)
+                state.state = "settings"
+                await ctx.storage.push(ctx.userID, state)
+                break
+            } else {
+                await ctx.chat.sendMessage("Error, dump: " + JSON.stringify(res_phone));
+                await ctx.chat.sendMessage(ctx.constants.getPrompt(localizationNames.defaultPrompt, ctx.user.settings.lang.api_id))
+                console.log('Cannot change user phone, dump:',JSON.stringify(res_phone))
+                await ctx.storage.delete(ctx.userID)
+            }
+            break
+        default:
+            await ctx.chat.sendMessage("Not Implemented: SettingsHandler state: " + state.state);
+            break;
+    }
+}

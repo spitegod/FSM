@@ -1,0 +1,556 @@
+{
+  "schemaVersion": "1.0",
+  "title": "Vote Client Emulator specification",
+  "purpose": "Description of test-client actions for manual Driver UI testing with Vote orders through the existing backend/FSM runtime.",
+  "scope": {
+    "included": [
+      "Create Vote orders",
+      "Wait for driver responses",
+      "Select a winning driver",
+      "Mirror passenger selection to data/passenger-choices.json for driver bots",
+      "Clear selected performer and return order to voting",
+      "Cancel order as client",
+      "Describe seven manual Driver UI test scenarios"
+    ],
+    "excluded": [
+      "Generic FSM engine implementation",
+      "Playwright tests",
+      "Driver FSM",
+      "Automated driver UI behaviour",
+      "New control panel or UI buttons"
+    ]
+  },
+  "runtime": {
+    "applicationRoot": "driver-emulator",
+    "clientSimulatorModule": "driver-emulator/src/client-simulator.js",
+    "scenarioRunnerModule": "driver-emulator/src/scenario-runner.js",
+    "orderGeneratorModule": "driver-emulator/src/order-generator.js",
+    "configurationFile": "driver-emulator/config.json",
+    "scenarioDirectory": "driver-emulator/src/scenarios",
+    "orderType": "VOTE",
+    "executionMode": "manual-driver-ui-testing"
+  },
+  "storedProcedureEngine": {
+    "type": "mysql_stored_procedure_fsm",
+    "procedure": "fsm_perform_action",
+    "procedureSource": "database/Dump20251127 (1).sql",
+    "procedureExport": "procedure.txt",
+    "transitionDataLocation": "database tables: fsm_states, fsm_actions, fsm_transitions",
+    "logTable": "fsm_action_logs",
+    "errorLogTable": "fsm_errors_log",
+    "callShape": {
+      "entity_type": "order",
+      "entity_id": "<orderId>",
+      "action_name": "<fsmActionName>",
+      "user_id": "<actorUserId>",
+      "extra_id": "<optionalPayloadValue>"
+    },
+    "note": "The stored procedure is treated as the existing FSM runtime. The client emulator description below defines which client actions should be translated to backend/FSM actions for Vote orders."
+  },
+  "backendCompatibility": {
+    "realBackendActions": {
+      "confirmVoteOrder": {
+        "endpoint": "POST /drive/get/<orderId>",
+        "payload": {
+          "action": "set_confirm_state"
+        }
+      },
+      "selectPerformer": {
+        "endpoint": "POST /drive/get/<orderId>",
+        "payload": {
+          "action": "set_performer",
+          "performer": "1",
+          "u_id": "<driverUserId>"
+        },
+        "driverUiEffect": "Selected driver sees assigned/performer state."
+      },
+      "releasePerformer": {
+        "endpoint": "POST /drive/get/<orderId>",
+        "payload": {
+          "action": "set_performer",
+          "performer": "0",
+          "u_id": "<driverUserId>"
+        },
+        "driverUiEffect": "Order returns to voting/new round."
+      },
+      "cancelOrder": {
+        "endpoint": "POST /drive/get/<orderId>",
+        "payload": {
+          "action": "set_cancel_state",
+          "reason": "<reason>"
+        }
+      },
+      "readOrder": {
+        "endpoint": "POST /drive/get/<orderId>?fields=00000000u1",
+        "payload": {
+          "array_type": "list"
+        }
+      }
+    },
+    "passengerChoicesMirror": {
+      "path": "driver-emulator/data/passenger-choices.json",
+      "role": "Local mirror only for driver bots. It is not the source of truth for the real Driver UI.",
+      "format": {
+        "<orderId>": "<driverUserId>"
+      },
+      "example": {
+        "12345": "205"
+      }
+    }
+  },
+  "voteOrderCreation": {
+    "source": "order-generator.js",
+    "mode": "voting",
+    "payloadFlags": {
+      "b_voting": 1,
+      "b_services": [
+        5
+      ],
+      "b_custom_comment": "[CASE] <scenarioName>"
+    },
+    "clientAccountRequirement": {
+      "requiredRole": "passenger/client",
+      "knownBlocker": "Backend returns wrong user role if a manager account is used as client.",
+      "configurationPath": "config.orderGenerator.clients[]"
+    }
+  },
+  "actors": {
+    "testClient": {
+      "source": "config.orderGenerator.clients[0]",
+      "fallback": "config.orderGenerator.useManagerAsClient is not recommended for real order creation because manager may not have passenger role."
+    },
+    "testerDriver": {
+      "resolutionPriority": [
+        "--tester=<userId>",
+        "TESTER_USER_ID",
+        "config.clientSimulator.testerUserId",
+        "first responder if tester is not specified"
+      ]
+    },
+    "otherDriver": {
+      "resolution": "Any responder whose u_id/c_id differs from testerDriver."
+    }
+  },
+  "driverCandidateStates": {
+    "1": "CONSIDERING",
+    "2": "CANCELED",
+    "3": "PERFORMER",
+    "4": "ARRIVED",
+    "5": "STARTED",
+    "6": "FINISHED"
+  },
+  "minimalClientSimulatorApi": {
+    "createVoteOrder": {
+      "inputs": {
+        "caseName": "string optional"
+      },
+      "returns": "orderId",
+      "realBackendFlow": [
+        "Create order through order-generator.js with mode=voting.",
+        "Set b_voting=1 and b_services=[5].",
+        "Write [CASE] <caseName> to order comment.",
+        "Call set_confirm_state if backend requires explicit vote-order confirmation."
+      ],
+      "storedProcedureEquivalent": [
+        {
+          "procedure": "fsm_perform_action",
+          "entity_type": "order",
+          "action_name": "order_publish_vote",
+          "user_id": "<clientUserId>",
+          "extra_id": null
+        }
+      ],
+      "expectedOrderState": "WAITING_FOR_CANDIDATES"
+    },
+    "selectDriver": {
+      "inputs": {
+        "orderId": "number|string",
+        "userId": "number|string"
+      },
+      "returns": "backend response",
+      "realBackendFlow": [
+        "Call set_performer with performer=1 and selected driver u_id.",
+        "Write passenger choice mirror to data/passenger-choices.json."
+      ],
+      "storedProcedureEquivalent": [
+        {
+          "procedure": "fsm_perform_action",
+          "entity_type": "order",
+          "action_name": "order_select_candidate",
+          "user_id": "<clientUserId>",
+          "extra_id": "<driverUserId>"
+        }
+      ],
+      "expectedOrderState": "DRIVER_ASSIGNED",
+      "expectedDriverUiEffect": "Selected driver is shown as assigned performer."
+    },
+    "clearSelection": {
+      "inputs": {
+        "orderId": "number|string"
+      },
+      "returns": "backend response or null",
+      "realBackendFlow": [
+        "Remove orderId from data/passenger-choices.json.",
+        "If selected driver is known, call set_performer with performer=0 and selected driver u_id."
+      ],
+      "storedProcedureEquivalent": [
+        {
+          "procedure": "fsm_perform_action",
+          "entity_type": "order",
+          "action_name": "order_release_candidate",
+          "user_id": "<clientUserId>",
+          "extra_id": "<driverUserId>"
+        }
+      ],
+      "expectedOrderState": "WAITING_FOR_CANDIDATES",
+      "expectedDriverUiEffect": "Order returns to voting/new round."
+    },
+    "wait": {
+      "inputs": {
+        "ms": "number"
+      },
+      "returns": "void",
+      "realBackendFlow": [
+        "Sleep locally. No backend call."
+      ],
+      "storedProcedureEquivalent": []
+    },
+    "cancelOrder": {
+      "inputs": {
+        "orderId": "number|string",
+        "reason": "string optional"
+      },
+      "returns": "backend response",
+      "realBackendFlow": [
+        "Call set_cancel_state.",
+        "Remove orderId from data/passenger-choices.json."
+      ],
+      "storedProcedureEquivalent": [
+        {
+          "procedure": "fsm_perform_action",
+          "entity_type": "order",
+          "action_name": "order_cancel_by_client",
+          "user_id": "<clientUserId>",
+          "extra_id": "<reason>"
+        }
+      ],
+      "expectedOrderState": "CANCELLED"
+    },
+    "getResponders": {
+      "inputs": {
+        "orderId": "number|string"
+      },
+      "returns": [
+        {
+          "u_id": "string",
+          "c_id": "string",
+          "c_state": "number|null"
+        }
+      ],
+      "realBackendFlow": [
+        "Read order detail and parse order.drivers."
+      ],
+      "storedProcedureEquivalent": []
+    },
+    "waitForResponses": {
+      "inputs": {
+        "orderId": "number|string",
+        "min": "number default 1",
+        "includeUserId": "number|string optional",
+        "timeoutMs": "number optional"
+      },
+      "returns": "candidate responder list",
+      "realBackendFlow": [
+        "Poll getResponders until enough candidates appear or timeout expires."
+      ],
+      "storedProcedureEquivalent": []
+    },
+    "resolveTester": {
+      "inputs": {
+        "responders": "array",
+        "testerUserId": "number|string optional"
+      },
+      "returns": "tester driver userId or null",
+      "rule": "If testerUserId is provided, return matching u_id/c_id. Otherwise return first responder."
+    },
+    "resolveOther": {
+      "inputs": {
+        "responders": "array",
+        "excludeUserId": "number|string optional"
+      },
+      "returns": "other driver userId or null",
+      "rule": "Return first responder whose u_id/c_id differs from excludeUserId."
+    }
+  },
+  "scenarioRunner": {
+    "script": "npm run client",
+    "directScript": "node src/scenario-runner.js",
+    "testerParameter": "--tester=<userId>",
+    "testerEnvironmentVariable": "TESTER_USER_ID",
+    "configBlock": "config.clientSimulator",
+    "defaultBetweenOrdersSeconds": 30,
+    "defaultLoop": true,
+    "scenarioKeysConfigPath": "config.clientSimulator.scenarios"
+  },
+  "scenarios": [
+    {
+      "key": "vote-selected",
+      "name": "Vote Driver Selected",
+      "goal": "Tester driver should become selected performer.",
+      "steps": [
+        {
+          "op": "createVoteOrder",
+          "caseName": "Vote Driver Selected",
+          "saveAs": "orderId"
+        },
+        {
+          "op": "waitForResponses",
+          "orderId": "$orderId",
+          "min": 1,
+          "includeUserId": "$testerUserId",
+          "saveAs": "candidates"
+        },
+        {
+          "op": "resolveTester",
+          "responders": "$candidates",
+          "testerUserId": "$testerUserId",
+          "saveAs": "targetDriverId"
+        },
+        {
+          "op": "selectDriver",
+          "orderId": "$orderId",
+          "userId": "$targetDriverId"
+        }
+      ],
+      "expectedDriverUi": [
+        "New order",
+        "Voting",
+        "Assigned as performer"
+      ]
+    },
+    {
+      "key": "vote-not-selected",
+      "name": "Vote Other Driver Selected",
+      "goal": "Tester driver should see that another driver was selected.",
+      "steps": [
+        {
+          "op": "createVoteOrder",
+          "caseName": "Vote Other Driver Selected",
+          "saveAs": "orderId"
+        },
+        {
+          "op": "waitForResponses",
+          "orderId": "$orderId",
+          "min": 2,
+          "includeUserId": "$testerUserId",
+          "saveAs": "candidates"
+        },
+        {
+          "op": "resolveOther",
+          "responders": "$candidates",
+          "excludeUserId": "$testerUserId",
+          "saveAs": "otherDriverId"
+        },
+        {
+          "op": "selectDriver",
+          "orderId": "$orderId",
+          "userId": "$otherDriverId"
+        }
+      ],
+      "expectedDriverUi": [
+        "New order",
+        "Voting",
+        "Not selected"
+      ]
+    },
+    {
+      "key": "vote-auto-select",
+      "name": "Vote Auto Select",
+      "goal": "Client creates Vote order and does not choose a performer. Server decides further behaviour.",
+      "steps": [
+        {
+          "op": "createVoteOrder",
+          "caseName": "Vote Auto Select",
+          "saveAs": "orderId"
+        },
+        {
+          "op": "waitForResponses",
+          "orderId": "$orderId",
+          "min": 1,
+          "includeUserId": "$testerUserId",
+          "saveAs": "candidates"
+        },
+        {
+          "op": "noop",
+          "description": "Client intentionally does not select a driver."
+        }
+      ],
+      "expectedDriverUi": [
+        "New order",
+        "Voting",
+        "Server-defined auto-select or timeout result"
+      ]
+    },
+    {
+      "key": "vote-cancelled",
+      "name": "Vote Cancel During Voting",
+      "goal": "Order should be cancelled while drivers are still candidates.",
+      "steps": [
+        {
+          "op": "createVoteOrder",
+          "caseName": "Vote Cancel During Voting",
+          "saveAs": "orderId"
+        },
+        {
+          "op": "waitForResponses",
+          "orderId": "$orderId",
+          "min": 1,
+          "includeUserId": "$testerUserId",
+          "saveAs": "candidates"
+        },
+        {
+          "op": "cancelOrder",
+          "orderId": "$orderId",
+          "reason": "client cancel during voting"
+        }
+      ],
+      "expectedDriverUi": [
+        "New order",
+        "Voting",
+        "Order cancelled or removed"
+      ]
+    },
+    {
+      "key": "vote-new-round",
+      "name": "Vote New Round",
+      "goal": "Selected driver is released and order returns to voting.",
+      "steps": [
+        {
+          "op": "createVoteOrder",
+          "caseName": "Vote New Round",
+          "saveAs": "orderId"
+        },
+        {
+          "op": "waitForResponses",
+          "orderId": "$orderId",
+          "min": 1,
+          "includeUserId": "$testerUserId",
+          "saveAs": "candidates"
+        },
+        {
+          "op": "resolveOtherOrTester",
+          "responders": "$candidates",
+          "testerUserId": "$testerUserId",
+          "saveAs": "targetDriverId",
+          "rule": "Prefer other driver. If no other driver exists, use tester driver."
+        },
+        {
+          "op": "selectDriver",
+          "orderId": "$orderId",
+          "userId": "$targetDriverId"
+        },
+        {
+          "op": "wait",
+          "ms": 5000
+        },
+        {
+          "op": "clearSelection",
+          "orderId": "$orderId"
+        }
+      ],
+      "expectedDriverUi": [
+        "Driver selected",
+        "Selection released",
+        "Order returns to voting/new round"
+      ]
+    },
+    {
+      "key": "client-cancel-after-select",
+      "name": "Client Cancel After Selection",
+      "goal": "Tester driver is selected and then client cancels order.",
+      "steps": [
+        {
+          "op": "createVoteOrder",
+          "caseName": "Client Cancel After Selection",
+          "saveAs": "orderId"
+        },
+        {
+          "op": "waitForResponses",
+          "orderId": "$orderId",
+          "min": 1,
+          "includeUserId": "$testerUserId",
+          "saveAs": "candidates"
+        },
+        {
+          "op": "resolveTester",
+          "responders": "$candidates",
+          "testerUserId": "$testerUserId",
+          "saveAs": "targetDriverId"
+        },
+        {
+          "op": "selectDriver",
+          "orderId": "$orderId",
+          "userId": "$targetDriverId"
+        },
+        {
+          "op": "wait",
+          "ms": 30000
+        },
+        {
+          "op": "cancelOrder",
+          "orderId": "$orderId",
+          "reason": "client cancel after selection"
+        }
+      ],
+      "expectedDriverUi": [
+        "Assigned as performer",
+        "Order cancelled by client"
+      ]
+    },
+    {
+      "key": "no-show",
+      "name": "No Show",
+      "goal": "Create selected-performer conditions for manual no-show verification.",
+      "steps": [
+        {
+          "op": "createVoteOrder",
+          "caseName": "No Show",
+          "saveAs": "orderId"
+        },
+        {
+          "op": "waitForResponses",
+          "orderId": "$orderId",
+          "min": 1,
+          "includeUserId": "$testerUserId",
+          "saveAs": "candidates"
+        },
+        {
+          "op": "resolveTester",
+          "responders": "$candidates",
+          "testerUserId": "$testerUserId",
+          "saveAs": "targetDriverId"
+        },
+        {
+          "op": "selectDriver",
+          "orderId": "$orderId",
+          "userId": "$targetDriverId"
+        },
+        {
+          "op": "manualStep",
+          "description": "No explicit backend API for no-show is defined. Human tester continues no-show flow in real Driver UI."
+        }
+      ],
+      "expectedDriverUi": [
+        "Assigned as performer",
+        "Tester manually checks no-show flow"
+      ]
+    }
+  ],
+  "notes": [
+    "The real source of truth for winner selection is backend set_performer/performer=1/u_id or the equivalent stored-procedure FSM action.",
+    "data/passenger-choices.json must still be updated because simulator.js driver bots read it.",
+    "Vote New Round should release the selected performer with performer=0 or the equivalent FSM action.",
+    "Cancellation should use set_cancel_state or the equivalent FSM action.",
+    "A real passenger/client account is required for creating orders; manager credentials may fail with wrong user role."
+  ]
+}
